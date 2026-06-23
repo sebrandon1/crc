@@ -22,6 +22,34 @@ type CheckFunc func() error
 type FixFunc func() error
 type CleanUpFunc func() error
 
+type CheckStatus string
+
+const (
+	StatusPassed  CheckStatus = "Passed"
+	StatusFailed  CheckStatus = "Failed"
+	StatusSkipped CheckStatus = "Skipped"
+)
+
+func (s CheckStatus) Label() string {
+	switch s {
+	case StatusPassed:
+		return "PASS"
+	case StatusFailed:
+		return "FAIL"
+	case StatusSkipped:
+		return "SKIP"
+	default:
+		return string(s)
+	}
+}
+
+type CheckResult struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Status      CheckStatus `json:"status"`
+	Error       string      `json:"error,omitempty"`
+}
+
 type Check struct {
 	configKeySuffix    string
 	checkDescription   string
@@ -185,4 +213,33 @@ func CleanUpHost() error {
 	// which are behind the experiment flag. This way cleanup
 	// perform action in a sane way.
 	return doCleanUpPreflightChecks(getAllPreflightChecks())
+}
+
+func doCheckAllPreflightChecks(config crcConfig.Storage, checks []Check) []CheckResult {
+	results := make([]CheckResult, 0, len(checks))
+	for _, check := range checks {
+		if check.flags&CleanUpOnly == CleanUpOnly || check.flags&StartUpOnly == StartUpOnly {
+			continue
+		}
+
+		r := CheckResult{
+			Name:        check.configKeySuffix,
+			Description: check.checkDescription,
+		}
+
+		if check.shouldSkip(config) {
+			r.Status = StatusSkipped
+		} else if err := check.doCheck(config); err != nil {
+			r.Status = StatusFailed
+			r.Error = err.Error()
+		} else {
+			r.Status = StatusPassed
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+func CheckHost(config crcConfig.Storage) []CheckResult {
+	return doCheckAllPreflightChecks(config, getPreflightChecksHelper(config))
 }

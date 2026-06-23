@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"text/tabwriter"
 
 	crcConfig "github.com/crc-org/crc/v2/pkg/crc/config"
 	"github.com/crc-org/crc/v2/pkg/crc/constants"
@@ -64,20 +65,85 @@ func runSetup(_ []string) error {
 		return err
 	}
 
+	if checkOnly {
+		return runCheckOnly()
+	}
+
 	// set global variable to force terminal output
 	crcTerminal.ForceShowOutput = forceShowProgressbars
-	err := preflight.SetupHost(config, checkOnly)
-	if err != nil && checkOnly {
-		err = exec.CodeExitError{
-			Err:  err,
-			Code: preflightFailedExitCode,
-		}
-	}
+	err := preflight.SetupHost(config, false)
 
 	return render(&setupResult{
 		Success: err == nil,
 		Error:   crcErrors.ToSerializableError(err),
 	}, os.Stdout, outputFormat)
+}
+
+func runCheckOnly() error {
+	results := preflight.CheckHost(config)
+
+	var passed, failed, skipped int
+	for _, r := range results {
+		switch r.Status {
+		case preflight.StatusPassed:
+			passed++
+		case preflight.StatusFailed:
+			failed++
+		case preflight.StatusSkipped:
+			skipped++
+		}
+	}
+
+	result := &checkOnlyResult{
+		Success: failed == 0,
+		Checks:  results,
+		Summary: checkSummary{
+			Total:   len(results),
+			Passed:  passed,
+			Failed:  failed,
+			Skipped: skipped,
+		},
+	}
+
+	if err := render(result, os.Stdout, outputFormat); err != nil {
+		return err
+	}
+	if failed > 0 {
+		return exec.CodeExitError{
+			Err:  fmt.Errorf("%d preflight check(s) failed", failed),
+			Code: preflightFailedExitCode,
+		}
+	}
+	return nil
+}
+
+type checkOnlyResult struct {
+	Success bool                    `json:"success"`
+	Checks  []preflight.CheckResult `json:"checks"`
+	Summary checkSummary            `json:"summary"`
+}
+
+type checkSummary struct {
+	Total   int `json:"total"`
+	Passed  int `json:"passed"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
+}
+
+func (c *checkOnlyResult) prettyPrintTo(writer io.Writer) error {
+	w := tabwriter.NewWriter(writer, 0, 0, 2, ' ', 0)
+	for _, r := range c.Checks {
+		fmt.Fprintf(w, "%s\t%s\n", r.Status.Label(), r.Description)
+		if r.Status == preflight.StatusFailed {
+			fmt.Fprintf(w, "\t  Error: %s\n", r.Error)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintf(writer, "\nResults: %d passed, %d failed, %d skipped\n",
+		c.Summary.Passed, c.Summary.Failed, c.Summary.Skipped)
+	return nil
 }
 
 type setupResult struct {
